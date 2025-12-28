@@ -12,13 +12,20 @@ import Carbon
 import NotificationCenter
 import os.log
 import ServiceManagement
+import IOKit
 
 @NSApplicationMain
 class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let defaults = UserDefaults(suiteName: "org.zhen.YogaSMC")!
     var conf = SharedConfig()
     var IOClass = "YogaSMC"
-
+    
+    //DYTC Slider
+    let slider = NSSlider(frame: NSRect(x: 15, y: 20, width: 200, height: 5))
+    let PSCSupport = NSLocalizedString("PSC Support", comment: "")
+    
+    let DYTCCommand = ["L", "M", "H"]
+            
     var statusItem: NSStatusItem?
     @IBOutlet weak var appMenu: NSMenu!
     var hide = false
@@ -28,6 +35,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var hideCapslock = false
     var capslockTimer: Timer?
     var capslockState = false
+    var PSCState = true
+    var SliderNumber = 1
+    
     @objc func showCapslock(sender: Timer) {
         let current = GetCurrentKeyModifiers() & UInt32(alphaLock) != 0
         if current != capslockState {
@@ -42,7 +52,30 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var fanHelper2: ThinkFanHelper?
     var fanTimer: Timer?
 
+    @objc func setPerformance() {
+        if (defaults.bool (forKey: "PSCState") == false)
+        {
+            switch defaults.integer (forKey: "SliderNumber"){
+            case 0:
+                _ = sendString("DYTCMode", DYTCCommand[0], conf.service)
+            case 1:
+                _ = sendString("DYTCMode", DYTCCommand[1], conf.service)
+            case 2:
+                _ = sendString("DYTCMode", DYTCCommand[2], conf.service)
+            default:
+                os_log("Invalid value", type: .info)
+            }
+            print("Setting Performance to, Slider Value: \(defaults.integer (forKey: "SliderNumber")) PSCSupport: \(defaults.bool (forKey: "PSCState"))")
+        }
+        else
+        {
+            _ = sendNumber("DYTCPSCMode", (defaults.integer (forKey: "SliderNumber") != 0) ? defaults.integer (forKey: "SliderNumber") : 0xf, conf.service)
+            print("Setting Performance to, Slider Value: \(defaults.integer (forKey: "SliderNumber")) PSCSupport: \(defaults.bool (forKey: "PSCState"))")
+        }
+        
+    }
     @objc func thinkWakeup() {
+        
         micMuteLEDHelper(conf.service)
         muteLEDHelper(conf.service)
 
@@ -52,6 +85,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if fanHelper != nil {
             fanHelper?.setFanLevel()
         }
+        
+        //Set performance after wake
+        print("Wakeup detected, setting saved performance level")
+        setPerformance()
+        
     }
 
     @objc func thinkMuteLEDFixup() {
@@ -74,6 +112,49 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if #available(macOS 10.12, *) {
                 os_log("Toggle start at login failed", type: .error)
             }
+        }
+    }
+    
+    @objc func enablePSC(_ sender: NSMenuItem) {
+        if sender.state == .off
+        {
+            slider.maxValue = 8
+            slider.minValue = 0
+            slider.numberOfTickMarks = 9
+            slider.target = self
+            slider.action = #selector(sliderChanged)
+            slider.allowsTickMarkValuesOnly = true
+            slider.isContinuous = false
+            print("Slider value: \(slider.intValue))")
+            print("PSCStateAfterOFF: \(defaults.bool(forKey: "PSCState"))")
+            defaults.setValue((true), forKey: "PSCState")
+            sender.state = .on
+            print("senderValue: \(sender.state)")
+            setPerformance()
+            sliderChanged(slider)
+           
+        }
+        else
+        {
+            slider.maxValue = 2
+            slider.minValue = 0
+            slider.numberOfTickMarks = 3
+            slider.target = self
+            slider.action = #selector(sliderChanged)
+            slider.allowsTickMarkValuesOnly = true
+            slider.isContinuous = false
+            print("PSCStateAfterON: \(defaults.bool(forKey: "PSCState"))")
+            defaults.setValue((false), forKey: "PSCState")
+            sender.state = .off
+            print("senderValue: \(sender.state)")
+            if (defaults.integer(forKey: "SliderNumber") >= 3)
+            {
+                print("more than 3")
+                defaults.setValue(1, forKey: "SliderNumber")
+                slider.integerValue = 1
+            }
+            setPerformance()
+            sliderChanged(slider)
         }
     }
 
@@ -200,6 +281,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         loadConfig()
 
         initMenu(props["VersionInfo"] as? String ?? NSLocalizedString("Unknown Version", comment: ""))
+        
         initNotification(props["EC Capability"] as? String)
 
         capslockState = GetCurrentKeyModifiers() & UInt32(alphaLock) != 0
@@ -207,12 +289,108 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             conf.modifier.insert(.capsLock)
         }
         NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged, handler: flagsCallBack)
+        
+        setPerformance()
+        slider.integerValue = defaults.integer(forKey: "SliderNumber")
     }
 
     func applicationWillTerminate(_ aNotification: Notification) {
         saveConfig()
         NSWorkspace.shared.notificationCenter.removeObserver(self)
         IOServiceClose(conf.connect)
+    }
+    
+    // DYTC: - Control
+    
+    func addDYTCEntries(_ dict: NSDictionary) {
+        appMenu.insertItem(NSMenuItem.separator(), at: 4)
+
+            let DYTCRevision = "DYTCRevision: \(dict["Revision"] as? NSNumber ?? 0).\(dict["SubRevision"] as? NSNumber ?? 0)"
+
+            appMenu.insertItem(withTitle: DYTCRevision, action: nil, keyEquivalent: "", at: 5)
+            
+            let DYTCFunction = "DYTCFunction: \(dict["FuncMode"] as? String ?? "Unknown")"
+            appMenu.insertItem(withTitle: DYTCFunction, action: nil, keyEquivalent: "", at: 6)
+        
+        
+            //PSC Support
+            let psc = NSMenuItem(title: PSCSupport, action: #selector(enablePSC), keyEquivalent: "p")
+            print("PSCStateToSetCheck: \(defaults.bool(forKey: "PSCState"))")
+            
+            psc.state = defaults.bool(forKey: "PSCState") ? .on : .off
+            appMenu.insertItem(psc, at: 7)
+
+            if defaults.bool(forKey: "PSCState") == false{
+                slider.maxValue = 2
+                slider.minValue = 0
+                slider.numberOfTickMarks = 3
+                slider.target = self
+                slider.action = #selector(sliderChanged)
+                slider.allowsTickMarkValuesOnly = true
+                slider.isContinuous = false
+                
+                
+                let view = NSView(frame: NSRect(x: 0, y: 0, width: slider.frame.width + 40, height: slider.frame.height + 40))
+                view.addSubview(slider)
+                let item = NSMenuItem()
+                item.view = view
+                appMenu.insertItem(item, at: 8)
+            
+            }
+            if defaults.bool(forKey: "PSCState") == true{
+                slider.maxValue = 8
+                slider.minValue = 0
+                slider.numberOfTickMarks = 9
+                slider.target = self
+                slider.action = #selector(sliderChanged)
+                slider.allowsTickMarkValuesOnly = true
+                slider.isContinuous = false
+                
+                
+                let view = NSView(frame: NSRect(x: 0, y: 0, width: slider.frame.width + 40, height: slider.frame.height + 40))
+                view.addSubview(slider)
+                let item = NSMenuItem()
+                item.view = view
+                appMenu.insertItem(item, at: 8)
+            }
+            
+        appMenu.insertItem(withTitle: "Quiet        Balance        Perf" , action: nil, keyEquivalent: "", at: 9)
+        appMenu.insertItem(NSMenuItem.separator(), at: 10)
+            
+        switch dict["FuncMode"] as? String{
+        case "Desk":
+            slider.intValue = 2
+        case "Standard":
+            slider.intValue = 1
+        default:
+            slider.intValue = 0
+            os_log("Unknown", type: .info)
+        }
+        
+    }
+    func setDYTC(slider: NSSlider) {
+        
+        os_log("Slider Value: %d", type: .info, slider.integerValue)
+        defaults.setValue(slider.integerValue, forKey: "SliderNumber")
+        
+        setPerformance()
+    }
+
+    @objc func sliderChanged(_ sender: NSSlider) {
+        //os_log("Slider Value: %d", type: .info, sender.integerValue)
+                
+        setDYTC(slider: sender)
+        
+        let dict = getDictionary("DYTC", self.conf.service)!
+
+        let NewDYTCFunction = "DYTCFunction: \(dict["FuncMode"] as? String ?? "Unknown")"
+        print("New DYTCFunction: \(NewDYTCFunction)")
+    
+        guard let DYTCFunctionItem = self.appMenu.item(at: 6) else {
+            print("DYTCFunctionItem not found at index 5")
+            return
+            }
+        DYTCFunctionItem.title = NewDYTCFunction
     }
 
     // MARK: - Configuration
@@ -252,17 +430,24 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         appMenu.insertItem(NSMenuItem.separator(), at: 1)
         appMenu.insertItem(withTitle: classPrompt, action: nil, keyEquivalent: "", at: 2)
         appMenu.insertItem(withTitle: version, action: nil, keyEquivalent: "", at: 3)
+       
+        if let dict = getDictionary("DYTC", conf.service) {
+            let DYTCRevision = "DYTCRevision: \(dict["Revision"] as? NSNumber ?? 0).\(dict["SubRevision"] as? NSNumber ?? 0)"
+            addDYTCEntries(dict)
+        }
 
         let loginPrompt = NSLocalizedString("Start at Login", comment: "")
         let login = NSMenuItem(title: loginPrompt, action: #selector(toggleStartAtLogin), keyEquivalent: "s")
         login.state = defaults.bool(forKey: "StartAtLogin") ? .on : .off
-        appMenu.insertItem(NSMenuItem.separator(), at: 4)
-        appMenu.insertItem(login, at: 5)
+        appMenu.insertItem(NSMenuItem.separator(), at: 11)
+        appMenu.insertItem(login, at: 12)
 
         let prefPrompt = NSLocalizedString("Preferences", comment: "")
         let pref = NSMenuItem(title: prefPrompt, action: #selector(openPrefpane), keyEquivalent: "p")
-        appMenu.insertItem(NSMenuItem.separator(), at: 6)
-        appMenu.insertItem(pref, at: 7)
+        appMenu.insertItem(NSMenuItem.separator(), at: 13)
+        appMenu.insertItem(pref, at: 14)
+        appMenu.insertItem(NSMenuItem.separator(), at: 15)
+
     }
 
     func initNotification(_ ECCap: String?) {
@@ -295,7 +480,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     showOSD("ECAccessUnavailable")
                 }
             }
-
+            
             NSWorkspace.shared.notificationCenter.addObserver(
                 self,
                 selector: #selector(thinkWakeup),
@@ -396,6 +581,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             defaults.setValue(false, forKey: "StartAtLogin")
         }
+        
+        PSCState = defaults.bool(forKey: "PSCState")
+        SliderNumber = defaults.integer(forKey: "SliderNumber")
+
 
         hide = defaults.bool(forKey: "HideIcon")
         hideCapslock = defaults.bool(forKey: "HideCapsLock")
